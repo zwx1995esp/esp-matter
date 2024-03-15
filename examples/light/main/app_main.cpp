@@ -10,6 +10,9 @@
 #include <esp_log.h>
 #include <nvs_flash.h>
 
+#include "esp_timer.h"
+#include "esp_ieee802154.h"
+
 #include <esp_matter.h>
 #include <esp_matter_cluster.h>
 #include <esp_matter_console.h>
@@ -146,6 +149,41 @@ static esp_err_t app_attribute_update_cb(attribute::callback_type_t type, uint16
     return err;
 }
 
+// handler of timer
+esp_timer_handle_t periodic_timer;
+
+#define TIMER_PERIOD_UINT_10MS 10
+#define RX_WINDOWS_UINT_10MS 1
+
+static void periodic_timer_callback(void* arg)
+{
+    static int times = 0;
+    static bool rx_off = true;
+    if (times > TIMER_PERIOD_UINT_10MS) {
+        times = 0;
+    }
+    if (times < RX_WINDOWS_UINT_10MS) {
+        if (rx_off) {
+            esp_ieee802154_receive();
+            rx_off = false;
+        }
+    } else {
+        if (!rx_off) {
+            esp_ieee802154_sleep();
+            rx_off = true;
+        }
+    }
+    times++;
+}
+
+// Receive done handler, and this is a interrupt context.
+void esp_ieee802154_receive_done(uint8_t *frame, esp_ieee802154_frame_info_t *frame_info)
+{
+    ESP_EARLY_LOGW("IEEE802154", "Rx Done %d bytes", frame[0]);
+    // This API is needed, please see file `esp_ieee802154.h` line 466
+    esp_ieee802154_receive_handle_done(frame);
+}
+
 extern "C" void app_main()
 {
     esp_err_t err = ESP_OK;
@@ -157,6 +195,23 @@ extern "C" void app_main()
     app_driver_handle_t light_handle = app_driver_light_init();
     app_driver_handle_t button_handle = app_driver_button_init();
     app_reset_button_register(button_handle);
+
+    // Enable the ieee802154.
+    esp_ieee802154_enable();
+
+    // Set channel:
+    esp_ieee802154_set_channel(15);
+
+    // Periodic timer for enabling and disabling 154 rx
+    const esp_timer_create_args_t periodic_timer_args = {
+            .callback = &periodic_timer_callback,
+            /* name is optional, but may help identify the timer when debugging */
+            .name = "periodic"
+    };
+    // create the timer.
+    ESP_ERROR_CHECK(esp_timer_create(&periodic_timer_args, &periodic_timer));
+
+    ESP_ERROR_CHECK(esp_timer_start_periodic(periodic_timer, 10000));
 
     /* Create a Matter node and add the mandatory Root Node device type on endpoint 0 */
     node::config_t node_config;
